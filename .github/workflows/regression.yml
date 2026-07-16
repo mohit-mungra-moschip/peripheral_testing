@@ -18,10 +18,16 @@ on:
         options:
           - all
           - test_ethernet.py
+          - test_gpio.py
           - test_i2c.py
+          - test_leds.py
+          - test_pcie_hardware.py
           - test_pcie_software.py
           - test_rtc.py
+          - test_spi.py
           - test_timer.py
+          - test_uart.py
+          - test_watchdog.py
       enable_self_healing:
         description: 'Enable AI Self-Healing'
         required: true
@@ -37,6 +43,16 @@ on:
         required: false
         default: '3'
         type: string
+      monorepo_mode:
+        description: 'Monorepo mode — app + tests in same repo (skips test repo checkout)'
+        required: false
+        default: false
+        type: boolean
+      test_repo:
+        description: 'Test repository (only used when monorepo_mode is false)'
+        required: false
+        default: 'mohit-mungra-moschip/peripheral_testing'
+        type: string
 
 jobs:
   regression:
@@ -50,11 +66,31 @@ jobs:
       contents: write
       pull-requests: write
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: regression_ai
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
     steps:
       # ── Checkout App Repo ───────────────────────────────────────────────────
       - name: 📥 Checkout App Repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 20
+
+      # ── Checkout Test Repo (skipped in monorepo mode) ─────────────────────
+      - name: 📥 Checkout Test Repository
+        if: ${{ inputs.monorepo_mode != true }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.test_repo || 'mohit-mungra-moschip/peripheral_testing' }}
+          token: ${{ secrets.TEST_REPO_TOKEN }}
+          path: test_framework
           fetch-depth: 20
 
       # ── Python Setup ────────────────────────────────────────────────────────
@@ -63,15 +99,30 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: 'requirements.txt'
+          cache-dependency-path: ${{ inputs.monorepo_mode == true && 'requirements.txt' || 'test_framework/requirements.txt' }}
 
       - name: 📦 Install Dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install -r requirements.txt
+          # In monorepo mode requirements.txt is at root; otherwise inside test_framework/
+          if [ "${{ inputs.monorepo_mode }}" = "true" ]; then
+            REQ_FILE="requirements.txt"
+          else
+            REQ_FILE="test_framework/requirements.txt"
+          fi
+          pip install -r "$REQ_FILE"
           pip install pytest-json-report
+
+      # ── Database Setup ──────────────────────────────────────────────────────
+      - name: 🗄️ Setup Database
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/regression_ai
+        run: |
+          source .venv/bin/activate
+          # Initialize database tables
+          python -c "import asyncio; from app.database import engine, Base; exec('async def init():\n    async with engine.begin() as conn:\n        await conn.run_sync(Base.metadata.create_all)\nasyncio.run(init())')" || true
 
       # ── Execute Tests ───────────────────────────────────────────────────────
       - name: 🧪 Execute Regression Tests
@@ -86,18 +137,31 @@ jobs:
           find . -type f -name "*.pyc" -delete 2>/dev/null || true
           mkdir -p reports
           
+          # Set test root based on repo mode
+          if [ "${{ inputs.monorepo_mode }}" = "true" ]; then
+            TEST_ROOT="tests"
+          else
+            TEST_ROOT="test_framework/tests"
+          fi
+
           # Resolve test path based on selected scope
           case "${{ inputs.test_scope || 'all' }}" in
-            all) TEST_PATH="tests/" ;;
-            test_ethernet.py) TEST_PATH="tests/test_ethernet.py" ;;
-            test_i2c.py) TEST_PATH="tests/test_i2c.py" ;;
-            test_pcie_software.py) TEST_PATH="tests/test_pcie_software.py" ;;
-            test_rtc.py) TEST_PATH="tests/test_rtc.py" ;;
-            test_timer.py) TEST_PATH="tests/test_timer.py" ;;
-            *) TEST_PATH="tests/" ;;
+            all)                        TEST_PATH="${TEST_ROOT}/" ;;
+            test_ethernet.py)           TEST_PATH="${TEST_ROOT}/test_ethernet.py" ;;
+            test_gpio.py)               TEST_PATH="${TEST_ROOT}/test_gpio.py" ;;
+            test_i2c.py)                TEST_PATH="${TEST_ROOT}/test_i2c.py" ;;
+            test_leds.py)               TEST_PATH="${TEST_ROOT}/test_leds.py" ;;
+            test_pcie_hardware.py)      TEST_PATH="${TEST_ROOT}/test_pcie_hardware.py" ;;
+            test_pcie_software.py)      TEST_PATH="${TEST_ROOT}/test_pcie_software.py" ;;
+            test_rtc.py)                TEST_PATH="${TEST_ROOT}/test_rtc.py" ;;
+            test_spi.py)                TEST_PATH="${TEST_ROOT}/test_spi.py" ;;
+            test_timer.py)              TEST_PATH="${TEST_ROOT}/test_timer.py" ;;
+            test_uart.py)               TEST_PATH="${TEST_ROOT}/test_uart.py" ;;
+            test_watchdog.py)           TEST_PATH="${TEST_ROOT}/test_watchdog.py" ;;
+            *)                          TEST_PATH="${TEST_ROOT}/" ;;
           esac
-          
-          echo "Selected Test Path: $TEST_PATH"
+
+          echo "Mode: ${{ inputs.monorepo_mode == true && 'MONOREPO' || 'DUAL-REPO' }}  |  Test Path: $TEST_PATH"
           pytest "$TEST_PATH" -v --tb=short --json-report --json-report-file=reports/test_results.json 2>&1 | tee reports/raw_output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
@@ -133,19 +197,34 @@ jobs:
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           find . -type f -name "*.pyc" -delete 2>/dev/null || true
           
+          # Set test root and runner path based on repo mode
+          if [ "${{ inputs.monorepo_mode }}" = "true" ]; then
+            TEST_ROOT="tests"
+            RUNNER="regression_runner.py"
+          else
+            TEST_ROOT="test_framework/tests"
+            RUNNER="test_framework/regression_runner.py"
+          fi
+
           # Resolve test path based on selected scope
           case "${{ inputs.test_scope || 'all' }}" in
-            all) TEST_PATH="tests/" ;;
-            test_ethernet.py) TEST_PATH="tests/test_ethernet.py" ;;
-            test_i2c.py) TEST_PATH="tests/test_i2c.py" ;;
-            test_pcie_software.py) TEST_PATH="tests/test_pcie_software.py" ;;
-            test_rtc.py) TEST_PATH="tests/test_rtc.py" ;;
-            test_timer.py) TEST_PATH="tests/test_timer.py" ;;
-            *) TEST_PATH="tests/" ;;
+            all)                        TEST_PATH="${TEST_ROOT}/" ;;
+            test_ethernet.py)           TEST_PATH="${TEST_ROOT}/test_ethernet.py" ;;
+            test_gpio.py)               TEST_PATH="${TEST_ROOT}/test_gpio.py" ;;
+            test_i2c.py)                TEST_PATH="${TEST_ROOT}/test_i2c.py" ;;
+            test_leds.py)               TEST_PATH="${TEST_ROOT}/test_leds.py" ;;
+            test_pcie_hardware.py)      TEST_PATH="${TEST_ROOT}/test_pcie_hardware.py" ;;
+            test_pcie_software.py)      TEST_PATH="${TEST_ROOT}/test_pcie_software.py" ;;
+            test_rtc.py)                TEST_PATH="${TEST_ROOT}/test_rtc.py" ;;
+            test_spi.py)                TEST_PATH="${TEST_ROOT}/test_spi.py" ;;
+            test_timer.py)              TEST_PATH="${TEST_ROOT}/test_timer.py" ;;
+            test_uart.py)               TEST_PATH="${TEST_ROOT}/test_uart.py" ;;
+            test_watchdog.py)           TEST_PATH="${TEST_ROOT}/test_watchdog.py" ;;
+            *)                          TEST_PATH="${TEST_ROOT}/" ;;
           esac
-          
-          # Run python script from test framework path, passing local app directory
-          python regression_runner.py \
+
+          # Run AI regression runner (path differs by mode)
+          python "$RUNNER" \
             --project-path "." \
             --test-command "pytest $TEST_PATH" \
             --run-id "${{ github.run_id }}" \
@@ -225,7 +304,7 @@ jobs:
                 echo "✅ Webhook sync triggered successfully."
               fi
               source .venv/bin/activate
-              python3 utils/report_utils/update_reports_pr.py --pr-url "$PR_URL" --type "APP_HEAL" --run-id "${{ github.run_id }}"
+              python3 test_framework/utils/report_utils/update_reports_pr.py --pr-url "$PR_URL" --type "APP_HEAL" --run-id "${{ github.run_id }}"
             else
               echo "No healed changes found in App repo."
             fi
@@ -237,26 +316,40 @@ jobs:
       - name: 🚀 PR for Test Framework Fixes
         if: always()
         env:
-          GITHUB_TOKEN: ${{ secrets.TEST_REPO_TOKEN }}
+          # In monorepo mode use built-in GITHUB_TOKEN; in dual-repo use TEST_REPO_TOKEN
+          GITHUB_TOKEN: ${{ inputs.monorepo_mode == true && secrets.GITHUB_TOKEN || secrets.TEST_REPO_TOKEN }}
         run: |
           HEALING_TYPE="${{ steps.ai_pipeline.outputs.healing_type }}"
+          MONOREPO="${{ inputs.monorepo_mode }}"
+
           # Only create test PR if healing touched test code
           if [[ "$HEALING_TYPE" == "TEST_HEAL" || "$HEALING_TYPE" == "MIXED" ]]; then
-            cd test_framework
-            # Purge all __pycache__ and .pyc files — they must never appear in the diff
+
+            # ── Dual-repo mode: cd into the checked-out test_framework folder
+            if [ "$MONOREPO" != "true" ]; then
+              cd test_framework
+              PR_BODY_FILE="../reports/pr_body_tests.md"
+              UPDATE_SCRIPT="utils/report_utils/update_reports_pr.py"
+              VENV_ACTIVATE="../.venv/bin/activate"
+            else
+              # ── Monorepo mode: stay in root, tests/ is here
+              PR_BODY_FILE="reports/pr_body_tests.md"
+              UPDATE_SCRIPT="utils/report_utils/update_reports_pr.py"
+              VENV_ACTIVATE=".venv/bin/activate"
+            fi
+
+            # Purge __pycache__ so it never appears in the diff
             find tests/ -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
             find tests/ -type f -name "*.pyc" -delete 2>/dev/null || true
-            # Only open a PR if actual test files or dependency/config files were modified
+
+            # Only open a PR if actual test/config files were modified
             CHANGED=$(git diff --name-only | grep -E '(tests/.*\.py|requirements\.txt|pyproject\.toml|setup\.py)$' || true)
             if [ -n "$CHANGED" ]; then
-              echo "✨ Found healed changes in Test framework ($HEALING_TYPE). Creating branch and PR..."
+              echo "✨ Found healed changes in tests ($HEALING_TYPE). Creating branch and PR..."
               git config --global user.name "github-actions[bot]"
               git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-              HEALING_TYPE="${{ steps.ai_pipeline.outputs.healing_type }}"
               JIRA_IDS="${{ steps.ai_pipeline.outputs.jira_ids }}"
-
-              # Clean Jira IDs for branch naming (replace commas with hyphens and remove spaces)
               JIRA_BRANCH_PREFIX=""
               if [ -n "$JIRA_IDS" ]; then
                 JIRA_BRANCH_PREFIX=$(echo "$JIRA_IDS" | tr -d ' ' | tr ',' '-')
@@ -265,9 +358,8 @@ jobs:
 
               BRANCH_NAME="${JIRA_BRANCH_PREFIX}ai-fix-tests"
               git checkout -b "$BRANCH_NAME"
-              # Stage only modified tracked files matching our patterns
               git add -u
-              # Include Jira IDs in the commit message for traceability + Smart Commit transition
+
               if [ -n "$JIRA_IDS" ]; then
                 JIRA_KEYS_LIST=$(echo "$JIRA_IDS" | tr ',' ' ' | tr -s ' ')
                 git commit -m "$JIRA_KEYS_LIST #in-review #comment test(ai): auto-healed test definitions [$HEALING_TYPE]"
@@ -276,35 +368,49 @@ jobs:
               fi
               git push --force origin "$BRANCH_NAME"
 
-              # Build PR title with Jira IDs
-              JIRA_IDS="${{ steps.ai_pipeline.outputs.jira_ids }}"
               if [ -n "$JIRA_IDS" ]; then
                 PR_TITLE="$JIRA_IDS | [RegressionAI] Auto-Heal: Fix Test Assertions ($HEALING_TYPE)"
               else
                 PR_TITLE="[RegressionAI] Auto-Heal: Fix Test Assertions ($HEALING_TYPE)"
               fi
 
-              PR_URL=$(gh pr create \
-                --repo "mohit-mungra-moschip/peripheral_testing" \
-                --title "$PR_TITLE" \
-                --body-file ../reports/pr_body_tests.md \
-                --head "$BRANCH_NAME" \
-                --base main)
+              # In dual-repo mode, explicitly specify the external repo; in monorepo gh uses current repo
+              if [ "$MONOREPO" != "true" ]; then
+                TEST_REPO="${{ inputs.test_repo || 'mohit-mungra-moschip/peripheral_testing' }}"
+                PR_URL=$(gh pr create \
+                  --repo "$TEST_REPO" \
+                  --title "$PR_TITLE" \
+                  --body-file "$PR_BODY_FILE" \
+                  --head "$BRANCH_NAME" \
+                  --base main)
+              else
+                # Monorepo: gh picks up the current repo automatically
+                PR_URL=$(gh pr create \
+                  --title "$PR_TITLE" \
+                  --body-file "$PR_BODY_FILE" \
+                  --head "$BRANCH_NAME" \
+                  --base main)
+              fi
               echo "✅ Test PR created: $PR_URL"
 
-              # Programmatically trigger Jira webhook sync by closing and reopening the PR (forces Jira to link)
+              # Trigger Jira webhook sync
               PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
               if [ -n "$PR_NUM" ]; then
-                echo "🔄 Sleeping 5s before triggering sync..."
                 sleep 5
-                gh pr close "$PR_NUM" --repo "mohit-mungra-moschip/peripheral_testing"
-                gh pr reopen "$PR_NUM" --repo "mohit-mungra-moschip/peripheral_testing"
-                echo "✅ Webhook sync triggered successfully."
+                if [ "$MONOREPO" != "true" ]; then
+                  gh pr close "$PR_NUM" --repo "$TEST_REPO"
+                  gh pr reopen "$PR_NUM" --repo "$TEST_REPO"
+                else
+                  gh pr close "$PR_NUM"
+                  gh pr reopen "$PR_NUM"
+                fi
+                echo "✅ Webhook sync triggered."
               fi
-              source ../.venv/bin/activate
-              python3 utils/report_utils/update_reports_pr.py --pr-url "$PR_URL" --type "TEST_HEAL" --run-id "${{ github.run_id }}"
+
+              source "$VENV_ACTIVATE"
+              python3 "$UPDATE_SCRIPT" --pr-url "$PR_URL" --type "TEST_HEAL" --run-id "${{ github.run_id }}"
             else
-              echo "No healed changes found in Test repo."
+              echo "No healed changes found in test code."
             fi
           else
             echo "Healing type is '$HEALING_TYPE' — skipping Tests PR (no test code changes)."
