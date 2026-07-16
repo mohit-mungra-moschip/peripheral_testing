@@ -73,7 +73,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: regression_ai
         ports:
-          - 5432:5432
+          - 55432:5432
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
@@ -118,7 +118,7 @@ jobs:
       # ── Database Setup ──────────────────────────────────────────────────────
       - name: 🗄️ Setup Database
         env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/regression_ai
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:55432/regression_ai
         run: |
           source .venv/bin/activate
           # Initialize database tables
