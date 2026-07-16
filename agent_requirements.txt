@@ -1,0 +1,8 @@
+langchain
+langchain-core
+langchain-openai
+langgraph
+pytest-json-report
+pyyaml
+fabric # For executing diagnostic SSH commands from the host
+python-dotenv

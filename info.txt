@@ -1,0 +1,14 @@
+Requires multimeter:
+    - Pull‑up / pull‑down configuration
+    - Output drive strength (basic validation) 
+
+Requires any I2C Device:
+    - Clock stretching 
+
+stucked:
+    - console vs secondary uarts - partially completed
+    - RTC - Power-off retention - battery needed
+    - USB - USB 2.0 / 3.0 ports     -
+          - Host mode enumeration    | Flash drive needed
+          - Power delivery (5V)      |
+          - Hot‑plug behavior       -

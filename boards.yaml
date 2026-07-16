@@ -1,0 +1,46 @@
+raspberry_pi_5: &raspberry_pi_5
+  chip: "/dev/gpiochip4"
+  out_pin: 17
+  in_pin: 27
+  mux_test_pin: 14        # GPIO 14 (Physical Pin 8)
+  expected_mux: "TXD0"    # We expect it to be muxed to UART Transmit 0
+  i2c_bus: 1
+  spi_bus: 0              
+  spi_device: 0
+  sclk_monitor_pin: 27
+  mosi_monitor_pin: 22
+  uart_port: "/dev/ttyAMA0"
+  uart_baud: 115200
+  cts_driver_gpio: 26
+  secondary_uart_port: "/dev/ttyAMA2"
+  watchdog_path: "/dev/watchdog0"
+  watchdog_timeout: 15
+  watchdog_feed_cycles: 3
+  allow_destructive_reboot: True  # Set to True ONLY when you want to kill the Pi
+  
+  # Timer Test Configuration
+  timer_jitter_target_sleep: 0.01
+  timer_jitter_iterations: 100
+  timer_acceptable_jitter_max: 0.005
+  timer_stress_thread_count: 100
+  timer_stress_max_delay: 1.0
+  cron_test_marker_file: "/tmp/pytest_cron_test.txt"
+
+  # Ethernet Test Configuration
+  eth_interface: "eth0"
+  eth_ping_target: "8.8.8.8"
+  eth_max_latency_ms: 50.0
+  eth_iperf_server: "" # Leave empty to auto-detect SSH Host IP
+  
+  remote:
+    host: "192.168.0.207"   
+    user: "rpi"             
+    password: "rpi"
+
+# Use `<<: *raspberry_pi_5` to instantly inherit all the hardware settings from above!
+# raspberry_pi_5_board2:
+#   <<: *raspberry_pi_5
+#   remote:
+#     host: "[IP_ADDRESS]"   
+#     user: "rpi"             
+#     password: "rpi"
